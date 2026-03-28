@@ -112,8 +112,9 @@ async def chat_with_failover(
 
 async def health_check() -> dict:
     """
-    Check both endpoints by hitting /v1/models — a real API path, not just the
-    landing page. Non-2xx responses (including 404 pages) are reported as unhealthy.
+    Check both endpoints by hitting /v1/models.
+    Requires a 2xx response AND a JSON Content-Type — an HTML 200 (e.g. Open WebUI
+    landing page served on the wrong path) is treated as unhealthy.
     """
     results = {}
     for label, base_url in [
@@ -124,10 +125,16 @@ async def health_check() -> dict:
         try:
             async with httpx.AsyncClient(timeout=5) as client:
                 resp = await client.get(url)
-                if resp.status_code < 300:
+                content_type = resp.headers.get("content-type", "")
+                is_json = "application/json" in content_type
+                if resp.status_code < 300 and is_json:
                     results[label] = {"status": "ok", "code": resp.status_code}
                 else:
-                    results[label] = {"status": "unhealthy", "code": resp.status_code}
+                    results[label] = {
+                        "status": "unhealthy",
+                        "code": resp.status_code,
+                        "content_type": content_type or "unknown",
+                    }
         except Exception as exc:
             results[label] = {"status": "unreachable", "error": str(exc)}
 
