@@ -40,7 +40,7 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:3000",   # React dev server
         "http://localhost:5173",   # Vite dev server (alternative)
-        "file://",                 # Electron production build
+        "null",                    # Electron production: file:// requests arrive with origin "null"
     ],
     allow_credentials=True,
     allow_methods=["*"],

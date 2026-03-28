@@ -9,6 +9,8 @@ Failover flow:
   2. If it raises any exception (timeout, connection error, 5xx), log it and
      immediately retry against secondary_endpoint.
   3. If secondary also fails, raise the error to the route handler.
+
+All I/O is async so a slow model request never blocks other concurrent requests.
 """
 
 import time
@@ -21,33 +23,39 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 
 
-def _build_payload(system_prompt: str, user_message: str) -> dict:
-    """Build the OpenAI-compatible request body."""
+def _build_payload(system_prompt: str, user_message: str, history: list[dict]) -> dict:
+    """
+    Build the OpenAI-compatible request body.
+
+    history is a list of prior {role, content} turns (user + assistant alternating).
+    The current user_message is appended after history so the model has full context.
+    """
+    messages = [{"role": "system", "content": system_prompt}]
+    messages.extend(history)
+    messages.append({"role": "user", "content": user_message})
     return {
         "model": settings.model_name,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_message},
-        ],
+        "messages": messages,
     }
 
 
-def _post_to_endpoint(base_url: str, payload: dict) -> dict:
+async def _post_to_endpoint(base_url: str, payload: dict) -> dict:
     """
     POST to a single endpoint and return the parsed JSON response.
     Raises httpx.HTTPError or httpx.TimeoutException on failure.
     """
     url = f"{base_url.rstrip('/')}/v1/chat/completions"
-    with httpx.Client(timeout=settings.request_timeout) as client:
-        response = client.post(url, json=payload)
+    async with httpx.AsyncClient(timeout=settings.request_timeout) as client:
+        response = await client.post(url, json=payload)
         response.raise_for_status()
         return response.json()
 
 
-def chat_with_failover(
+async def chat_with_failover(
     system_prompt: str,
     user_message: str,
     mode: str,
+    history: list[dict] | None = None,
 ) -> dict:
     """
     Send a chat request, failing over to the secondary server if needed.
@@ -57,7 +65,7 @@ def chat_with_failover(
       - server_used (str): which endpoint responded
       - latency_ms (int): round-trip time in milliseconds
     """
-    payload = _build_payload(system_prompt, user_message)
+    payload = _build_payload(system_prompt, user_message, history or [])
 
     endpoints = [
         ("primary", settings.primary_endpoint),
@@ -70,7 +78,7 @@ def chat_with_failover(
         start = time.monotonic()
         try:
             logger.info("Attempting %s endpoint (%s) | mode=%s", label, base_url, mode)
-            data = _post_to_endpoint(base_url, payload)
+            data = await _post_to_endpoint(base_url, payload)
             latency_ms = int((time.monotonic() - start) * 1000)
 
             reply = data["choices"][0]["message"]["content"]
@@ -104,19 +112,22 @@ def chat_with_failover(
 
 async def health_check() -> dict:
     """
-    Check reachability of both endpoints.
-    Returns a dict with status for each server.
-    Does a lightweight GET to the base URL (not a full chat request).
+    Check both endpoints by hitting /v1/models — a real API path, not just the
+    landing page. Non-2xx responses (including 404 pages) are reported as unhealthy.
     """
     results = {}
     for label, base_url in [
         ("primary", settings.primary_endpoint),
         ("secondary", settings.secondary_endpoint),
     ]:
+        url = f"{base_url.rstrip('/')}/v1/models"
         try:
             async with httpx.AsyncClient(timeout=5) as client:
-                resp = await client.get(base_url)
-                results[label] = {"status": "ok", "code": resp.status_code}
+                resp = await client.get(url)
+                if resp.status_code < 300:
+                    results[label] = {"status": "ok", "code": resp.status_code}
+                else:
+                    results[label] = {"status": "unhealthy", "code": resp.status_code}
         except Exception as exc:
             results[label] = {"status": "unreachable", "error": str(exc)}
 

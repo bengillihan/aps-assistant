@@ -9,15 +9,17 @@ const API_BASE = import.meta.env.VITE_API_URL || "";
 /**
  * Send a chat message to the backend.
  *
- * @param {string} message - User's text message
- * @param {string} mode    - "general" | "email" | "rag"
- * @param {File[]} files   - Optional file attachments
+ * @param {string} message   - User's text message
+ * @param {string} mode      - "general" | "email" | "rag"
+ * @param {File[]} files     - Optional file attachments
+ * @param {Array}  history   - Prior turns [{role, content}, ...], oldest first
  * @returns {Promise<{reply: string, mode: string, server_used: string, latency_ms: number}>}
  */
-export async function sendMessage(message, mode, files = []) {
+export async function sendMessage(message, mode, files = [], history = []) {
   const formData = new FormData();
   formData.append("message", message);
   formData.append("mode", mode);
+  formData.append("history", JSON.stringify(history));
 
   for (const file of files) {
     formData.append("files", file);
